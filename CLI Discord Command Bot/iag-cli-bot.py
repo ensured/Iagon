@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 import subprocess
 import requests
-
+import asyncio
 # Read Discord token from file
 with open("discord.token", "r") as token_file:
     TOKEN = token_file.read().strip()
@@ -26,9 +26,51 @@ intents.messages = True  # Enable message intents
 # Create a Discord bot instance with intents
 bot = commands.Bot(command_prefix='', intents=intents)
 
+# Global variable to store path
+node_info = {}
+
+async def fetch_node_info():
+    command = f"{COMMAND_PATH} get:info"
+    try:
+        result = await asyncio.to_thread(subprocess.run, command, shell=True, text=True, capture_output=True, timeout=30)
+        err = result.stderr.strip()
+        # Parse the output to extract the path
+        for line in err.splitlines():
+            if "Path:" in line:
+                path = line.split("Path:")[1].strip()  # Extract the path
+                node_info['path'] = path  # Store the path in the global variable
+                break
+    except Exception as e:
+        print(f"Error fetching node info: {e}")
+
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
+    # Fetch node info when the bot is ready
+    await fetch_node_info()
+    # Create a task for the presence loop instead of calling directly
+    asyncio.create_task(change_presence_loop())
+
+async def change_presence_loop():
+    while True:
+        command = f"{COMMAND_PATH} get:status"
+        # Run the command and capture both stdout and stderr output
+        try:
+            result = subprocess.run(command, shell=True, text=True, capture_output=True, timeout=30)
+            stderr = result.stderr.strip()  # Remove leading/trailing whitespace from stderr
+        except subprocess.CalledProcessError as e:
+            stderr = str(e.stderr, 'utf-8')
+        except subprocess.TimeoutExpired:
+            stderr = "Command timed out."
+
+        if "up" in stderr:
+            status = "Node: Online"
+        else:
+            status = "Node: Offline"
+        # Update presence with the status every 5 mins
+        await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=status))
+        await asyncio.sleep(300)
+
 
 @bot.event
 async def on_message(message):
@@ -45,26 +87,30 @@ async def on_message(message):
             print(f"Message received: '{message.content}' from {message.author}")
 
             # Extract the command from the message
-            if message.content.lower() == "test:rw": # Handling for test:rw that inputs the default directory
-                await message.channel.send("Testing read and write speeds in your Iagon storage directory. Please wait...")
-                command = f"echo \"\" | {COMMAND_PATH} {message.content}"
+            if message.content.lower() == "test:rw":  # Handling for test:rw that inputs the default directory
+                await message.channel.send(f"Running `{message.content}` command...")
 
-                # Run the command and capture stderr output only
+                command = f"{COMMAND_PATH} test:rw"  # Run the command without the path initially
+                # Run the command and capture output
                 try:
-                    result = subprocess.run(command, shell=True, text=True, capture_output=True, timeout=30)
-                    stderr = result.stderr.strip()  # Remove leading/trailing whitespace from stderr
+                    # Start the subprocess
+                    process = subprocess.Popen(command, shell=True, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    stdout, stderr = await asyncio.to_thread(process.communicate, input=node_info.get('path', 'Not found') + '\n', timeout=300)
+                    stdout = stdout.strip()  # Get the standard output
+                    stderr = stderr.strip()  # Get the standard error output
                 except subprocess.CalledProcessError as e:
                     stderr = str(e.stderr, 'utf-8')
                 except subprocess.TimeoutExpired:
                     stderr = "Command timed out."
 
+                print(f"Command stdout: '{stdout}'")
                 print(f"Command stderr: '{stderr}'")
 
-                # Send the stderr output back to the user
                 if stderr:
                     await message.channel.send(stderr)
                 else:
-                    await message.channel.send("No output available")
+                    await message.channel.send("Something went wrong")
+
             elif message.content.lower() == "version": # Handling for "version", an artificial command alias
                 command = f"{COMMAND_PATH} -V" # Convert "version" to the -V flag to check node version
                 await message.channel.send(f"Checking version...")
@@ -94,10 +140,10 @@ async def on_message(message):
             else:
                 command = f"{COMMAND_PATH} {message.content}"
                 await message.channel.send(f"Running `{message.content}` command...")
-
                 # Run the command and capture both stdout and stderr output
                 try:
-                    result = subprocess.run(command, shell=True, text=True, capture_output=True, timeout=30)
+                    timeout = 30 if "test:bw" not in message.content.lower() else 300
+                    result = subprocess.run(command, shell=True, text=True, capture_output=True, timeout=timeout)
                     stdout = result.stdout.strip()  # Remove leading/trailing whitespace from stdout
                     stderr = result.stderr.strip()  # Remove leading/trailing whitespace from stderr
                 except subprocess.CalledProcessError as e:
